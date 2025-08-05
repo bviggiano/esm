@@ -114,10 +114,10 @@ class EncodeInputs(nn.Module):
         # the `masked_fill(padding_mask.unsqueeze(2), 0)` for the two below is unnecessary
         # as pad tokens never even interact with the "real" tokens (due to sequence_id)
         dtype = self.sequence_embed.weight.dtype 
-        plddt_embed = self.plddt_projection(rbf_16_fn(average_plddt)).to(dtype=dtype)
+        plddt_embed = self.plddt_projection(rbf_16_fn(average_plddt).to(dtype=dtype))
         structure_per_res_plddt = self.structure_per_res_plddt_projection(
-            rbf_16_fn(per_res_plddt)
-        ).to(dtype=dtype)
+            rbf_16_fn(per_res_plddt).to(dtype=dtype)
+        )
 
         # Structure + "structural features" embeds
         structure_embed = self.structure_tokens_embed(structure_tokens)
