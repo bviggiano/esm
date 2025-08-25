@@ -56,6 +56,7 @@ class EsmSequenceTokenizer(PreTrainedTokenizerFast, EsmTokenizerBase):
             tokenizer_object=tokenizer,
             unk_token=unk_token,
             cls_token=cls_token,
+            bos_token=cls_token, 
             pad_token=pad_token,
             mask_token=mask_token,
             eos_token=eos_token,
