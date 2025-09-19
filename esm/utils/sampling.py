@@ -168,19 +168,19 @@ def sample_logits(
             "Can not sample logits if there are no valid ids to sample from."
         )
 
-    if top_p < 1.0:
-        logits = top_p_logits(logits, top_p=top_p)
-
-    temperature = _tensorize_like(temperature, logits)
-    batch_dims = logits.size()[:-1]
-    logits = logits.reshape(-1, logits.shape[-1])
-
     # Only sample from valid ids
     # the /logits endpoint should receive unmodified logits
     if mask_logits_of_invalid_ids:
         mask = torch.ones_like(logits, dtype=torch.bool)
         mask[..., valid_ids] = False
         logits[mask] = -torch.inf
+
+    if top_p < 1.0:
+        logits = top_p_logits(logits, top_p=top_p)
+
+    temperature = _tensorize_like(temperature, logits)
+    batch_dims = logits.size()[:-1]
+    logits = logits.reshape(-1, logits.shape[-1])
 
     if torch.all(temperature == 0):
         ids = logits.argmax(-1)
