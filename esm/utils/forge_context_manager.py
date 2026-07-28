@@ -48,7 +48,7 @@ class ForgeBatchExecutor:
 
     Args:
         max_attempts: Maximum attempts per task before failing.
-        max_workers: Maximum number of concurrent workers. Default is 512.
+        max_workers: Maximum number of concurrent workers. Default is 64.
         show_progress: Whether to display a tqdm progress bar. Default ``True``.
     """
 
@@ -143,7 +143,7 @@ class ForgeBatchExecutor:
                             retry_count += 1
                             pbar.update(0)
                         else:
-                            results[idx] = e  # type: ignore
+                            results[idx] = e
                             fail_count += 1
                             pbar.update(1)
 

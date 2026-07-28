@@ -33,9 +33,14 @@ from esm.utils.structure.affine3d import Affine3D
 from esm.utils.structure.aligner import Aligner
 from esm.utils.structure.atom_indexer import AtomIndexer
 from esm.utils.structure.metrics import compute_gdt_ts, compute_lddt_ca
-from esm.utils.structure.mmcif_parsing import MmcifWrapper, NoProteinError
+from esm.utils.structure.mmcif_parsing import (
+    MmcifWrapper,
+    NoProteinError,
+    round_mmcif_columns,
+)
 from esm.utils.structure.protein_chain import (
     ProteinChain,
+    _str_key_to_int_key,
     chain_to_ndarray,
     index_by_atom_name,
     infer_CB,
@@ -117,6 +122,18 @@ class ProteinComplexMetadata:
     assembly_composition: dict[str, list[str]] | None = None
 
 
+def _dockq_f1(f1: float, interface_rms: float, ligand_rms: float) -> float:
+    """DockQ's DockQ_F1: the DockQ formula with F1 substituted for fnat.
+
+    DockQ v2.1.2 dropped the DockQ_F1 output, so recompute it with the upstream
+    ``dockq_formula``. Imported lazily because DockQ is an optional dependency,
+    only needed when scoring.
+    """
+    from DockQ.DockQ import dockq_formula
+
+    return dockq_formula(f1, interface_rms, ligand_rms)
+
+
 @dataclass
 class DockQSingleScore:
     native_chains: tuple[str, str]
@@ -158,6 +175,7 @@ class ProteinComplex:
     confidence: np.ndarray
     # This metadata is parsed from the MMCIF file. For synthetic data, we do a best effort.
     metadata: ProteinComplexMetadata
+    atom37_confidence: np.ndarray | None = None  # [L, 37] per-atom pLDDT
 
     def __post_init__(self):
         l = len(self.sequence)
@@ -169,6 +187,11 @@ class ProteinComplex:
         assert self.entity_id.shape[0] == l, (self.entity_id.shape, l)
         assert self.chain_id.shape[0] == l, (self.chain_id.shape, l)
         assert self.sym_id.shape[0] == l, (self.sym_id.shape, l)
+        if self.atom37_confidence is not None:
+            assert self.atom37_confidence.shape == self.atom37_mask.shape, (
+                self.atom37_confidence.shape,
+                self.atom37_mask.shape,
+            )
 
     def __getitem__(self, idx: int | list[int] | slice | np.ndarray):
         """This function slices protein complexes without consideration of chain breaks
@@ -221,6 +244,9 @@ class ProteinComplex:
             atom37_positions=self.atom37_positions[..., idx, :, :],
             atom37_mask=self.atom37_mask[..., idx, :],
             confidence=self.confidence[..., idx],
+            atom37_confidence=self.atom37_confidence[..., idx, :]
+            if self.atom37_confidence is not None
+            else None,
         )
 
     def __len__(self):
@@ -313,10 +339,13 @@ class ProteinComplex:
             insertion_code=self.insertion_code,
             confidence=self.confidence,
             mmcif=self.metadata.mmcif,
+            atom37_confidence=self.atom37_confidence,
         )
 
     @classmethod
-    def from_pdb(cls, path: PathOrBuffer, id: str | None = None) -> "ProteinComplex":
+    def from_pdb(
+        cls, path: PathOrBuffer, id: str | None = None, is_predicted: bool = False
+    ) -> "ProteinComplex":
         atom_array = PDBFile.read(path).get_structure(
             model=1, extra_fields=["b_factor"]
         )
@@ -326,7 +355,7 @@ class ProteinComplex:
             chain = chain[~chain.hetero]
             if len(chain) == 0:
                 continue
-            chains.append(ProteinChain.from_atomarray(chain, id))
+            chains.append(ProteinChain.from_atomarray(chain, id, is_predicted))
         return ProteinComplex.from_chains(chains)
 
     def to_pdb(self, path: PathOrBuffer, include_insertions: bool = True):
@@ -385,6 +414,10 @@ class ProteinComplex:
         if backbone_only:
             dct["atom37_mask"][:, 3:] = False
         dct["atom37_positions"] = dct["atom37_positions"][dct["atom37_mask"]]
+        if dct.get("atom37_confidence") is not None:
+            dct["atom37_confidence"] = dct["atom37_confidence"][dct["atom37_mask"]]
+        else:
+            dct.pop("atom37_confidence", None)
         for k, v in dct.items():
             if isinstance(v, np.ndarray):
                 match v.dtype:
@@ -410,6 +443,9 @@ class ProteinComplex:
 
     @classmethod
     def from_state_dict(cls, dct):
+        # Note: assembly_composition is *supposed* to have string keys.
+        dct = _str_key_to_int_key(dct, ignore_keys=["assembly_composition"])
+
         for k, v in dct.items():
             if isinstance(v, list):
                 dct[k] = np.array(v)
@@ -417,8 +453,16 @@ class ProteinComplex:
         atom37 = np.full((*dct["atom37_mask"].shape, 3), np.nan)
         atom37[dct["atom37_mask"]] = dct["atom37_positions"]
         dct["atom37_positions"] = atom37
+        if "atom37_confidence" in dct:
+            atom37_conf = np.full(dct["atom37_mask"].shape, np.nan, dtype=np.float32)
+            atom37_conf[dct["atom37_mask"]] = dct["atom37_confidence"]
+            dct["atom37_confidence"] = atom37_conf
         dct = {
-            k: (v.astype(np.float32) if k in ["atom37_positions", "confidence"] else v)
+            k: (
+                v.astype(np.float32)
+                if k in ["atom37_positions", "confidence", "atom37_confidence"]
+                else v
+            )
             for k, v in dct.items()
         }
         if "chain_boundaries" in dct:
@@ -446,7 +490,7 @@ class ProteinComplex:
 
     @classmethod
     def from_rcsb(cls, pdb_id: str, keep_source: bool = False) -> ProteinComplex:
-        f: io.StringIO = rcsb.fetch(pdb_id, "cif")  # type: ignore
+        f: io.StringIO = rcsb.fetch(pdb_id, "cif")
         return cls.from_mmcif(f, id=pdb_id, keep_source=keep_source, is_predicted=False)
 
     @classmethod
@@ -500,8 +544,18 @@ class ProteinComplex:
             "confidence": np.array([0]),
         }
 
+        any_has_atom37_conf = any(c.atom37_confidence is not None for c in chains)
+        if any_has_atom37_conf:
+            sep_tokens["atom37_confidence"] = np.full([1, 37], np.nan, dtype=np.float32)
+
+        def _get_chain_attr(chain: ProteinChain, name: str) -> np.ndarray:
+            val = getattr(chain, name)
+            if val is None and name == "atom37_confidence":
+                return np.full([len(chain), 37], np.nan, dtype=np.float32)
+            return val
+
         array_args: dict[str, np.ndarray] = {
-            name: join_arrays([getattr(chain, name) for chain in chains], sep)
+            name: join_arrays([_get_chain_attr(chain, name) for chain in chains], sep)
             for name, sep in sep_tokens.items()
         }
 
@@ -851,19 +905,25 @@ class ProteinComplex:
             interfaces.append(current_interface)
 
         def parse_dict(d: dict[str, Any]) -> DockQSingleScore:
+            interface_rms = float(d["iRMSD"])
+            ligand_rms = float(d["LRMSD"])
+            f1 = float(d["F1"])
             return DockQSingleScore(
-                native_chains=tuple(d["Native chains"]),  # type: ignore
+                native_chains=tuple(d["Native chains"]),
                 DockQ=float(d["DockQ"]),
-                interface_rms=float(d["irms"]),
-                ligand_rms=float(d["Lrms"]),  # Note the capitalization difference
+                interface_rms=interface_rms,
+                ligand_rms=ligand_rms,
                 fnat=float(d["fnat"]),
                 fnonnat=float(d["fnonnat"]),
                 clashes=float(d["clashes"]),
-                F1=float(d["F1"]),
-                DockQ_F1=float(d["DockQ_F1"]),
+                F1=f1,
+                DockQ_F1=_dockq_f1(f1, interface_rms, ligand_rms),
             )
 
-        inv_mapping = {v: k for k, v in result["mapping"].items()}
+        inv_mapping = {
+            v: k
+            for k, v in result["mapping"].items()  # ty:ignore[unresolved-attribute]
+        }
 
         self_chain_map = {c.chain_id: c for c in self.chain_iter()}
         realigned = []
@@ -875,9 +935,11 @@ class ProteinComplex:
         realigned = aligner.apply(realigned)
 
         result = DockQResult(
-            total_dockq=result["value"],
-            native_interfaces=result["native interfaces"],
-            chain_mapping=result["mapping"],
+            total_dockq=result["value"],  # ty:ignore[invalid-argument-type]
+            native_interfaces=result[
+                "native interfaces"
+            ],  # ty:ignore[invalid-argument-type]
+            chain_mapping=result["mapping"],  # ty:ignore[invalid-argument-type]
             interfaces={
                 (i["Model chains"][0], i["Model chains"][1]): parse_dict(i)
                 for i in interfaces
@@ -972,6 +1034,10 @@ class ProteinComplex:
 
         # Add entity information for proper mmCIF structure
         self._add_entity_information(f)
+
+        # biotite echoes unmasked float columns at full precision
+        # so we round every float column to conventional mmCIF precision
+        round_mmcif_columns(f)
 
         # Write to string
         output = io.StringIO()
@@ -1104,20 +1170,20 @@ def get_assembly_fast(
     ### Get structure according to additional parameters
     structure = get_structure(
         pdbx_file, model, data_block, altloc, ["label_asym_id"], use_author_fields
-    )[0]  # type: ignore
+    )[0]
     # TODO(@zeming) This line will remove all non-protein structural elements,
     # we should remove this when we want to parse these too.
     structure: bs.AtomArray = structure[
-        bs.filter_amino_acids(structure) & ~structure.hetero  # type: ignore
+        bs.filter_amino_acids(structure) & ~structure.hetero
     ]
     if len(structure) == 0:
         raise NoProteinError
-    unique_asym_ids = np.unique(structure.label_asym_id)  # type: ignore
+    unique_asym_ids = np.unique(structure.label_asym_id)
     asym2chain = {}
     asym2auth = {}
     for asym_id in unique_asym_ids:
-        sub_structure: bs.AtomArray = structure[structure.label_asym_id == asym_id]  # type: ignore
-        chain_id: str = sub_structure[0].chain_id  # type: ignore
+        sub_structure: bs.AtomArray = structure[structure.label_asym_id == asym_id]
+        chain_id: str = sub_structure[0].chain_id
         (
             sequence,
             atom_positions,

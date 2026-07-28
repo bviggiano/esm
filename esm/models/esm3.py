@@ -56,6 +56,7 @@ class ESMOutput:
     function_logits: torch.Tensor
     residue_logits: torch.Tensor
     embeddings: torch.Tensor
+    attentions: tuple[torch.Tensor, ...] | None = None
 
 
 class EncodeInputs(nn.Module):
@@ -157,7 +158,12 @@ class OutputHeads(nn.Module):
         self.function_head = RegressionHead(d_model, 260 * 8)
         self.residue_head = RegressionHead(d_model, 1478)
 
-    def forward(self, x: torch.Tensor, embed: torch.Tensor) -> ESMOutput:
+    def forward(
+        self,
+        x: torch.Tensor,
+        embed: torch.Tensor,
+        attentions: tuple[torch.Tensor, ...] | None = None,
+    ) -> ESMOutput:
         sequence_logits = self.sequence_head(x)
         structure_logits = self.structure_head(x)
         secondary_structure_logits = self.ss8_head(x)
@@ -175,6 +181,7 @@ class OutputHeads(nn.Module):
             function_logits=function_logits,
             residue_logits=residue_logits,
             embeddings=embed,
+            attentions=attentions,
         )
 
 
@@ -271,6 +278,7 @@ class ESM3(nn.Module, ESM3InferenceClient):
         structure_coords: torch.Tensor | None = None,
         chain_id: torch.Tensor | None = None,
         sequence_id: torch.Tensor | None = None,
+        output_attentions: bool | None = None,
     ) -> ESMOutput:
         """
         Performs forward pass through the ESM3 model. Check utils to see how to tokenize inputs from raw data.
@@ -288,6 +296,7 @@ class ESM3(nn.Module, ESM3InferenceClient):
             structure_coords (torch.Tensor, optional): The structure coordinates, in the form of (B, L, 3, 3).
             chain_id (torch.Tensor, optional): The chain ID
             sequence_id (torch.Tensor, optional): The sequence ID.
+            output_attentions (bool, optional): Whether to return per-layer attention weights.
 
         Returns:
             ESMOutput: The output of the ESM3 model.
@@ -296,6 +305,7 @@ class ESM3(nn.Module, ESM3InferenceClient):
             ValueError: If at least one of the inputs is None.
 
         """
+        output_attentions = bool(output_attentions)
         # Reasonable defaults:
         try:
             L, device = next(
@@ -368,10 +378,15 @@ class ESM3(nn.Module, ESM3InferenceClient):
             function_tokens,
             residue_annotation_tokens,
         )
-        x, embedding, _ = self.transformer(
-            x, sequence_id, affine, affine_mask, chain_id
+        x, embedding, _, attentions = self.transformer(
+            x,
+            sequence_id,
+            affine,
+            affine_mask,
+            chain_id,
+            output_attentions=output_attentions,
         )
-        return self.output_heads(x, embedding)
+        return self.output_heads(x, embedding, attentions=attentions)
 
     # The following methods are for the ESM3InferenceClient interface
     def generate(self, input: ProteinType, config: GenerationConfig) -> ProteinType:
@@ -406,8 +421,8 @@ class ESM3(nn.Module, ESM3InferenceClient):
                 self,
                 inputs,  # type: ignore
                 configs,
-                self.tokenizers,  # type: ignore
-            )
+                self.tokenizers,
+            )  # ty:ignore[invalid-return-type]
         else:
             raise ValueError("Input must be an ESMProtein or ESMProteinTensor")
 
@@ -489,6 +504,7 @@ class ESM3(nn.Module, ESM3InferenceClient):
             function=function_tokens,
             residue_annotations=residue_annotation_tokens,
             coordinates=coordinates,
+            potential_sequence_of_concern=input.potential_sequence_of_concern,
         ).to(next(self.parameters()).device)
 
     def decode(self, input: ESMProteinTensor) -> ESMProtein:
@@ -519,11 +535,11 @@ class ESM3(nn.Module, ESM3InferenceClient):
 
         with (
             torch.no_grad(),  # Assume no gradients for now...
-            torch.autocast(enabled=True, device_type=device.type, dtype=torch.bfloat16)  # type: ignore
+            torch.autocast(enabled=True, device_type=device.type, dtype=torch.bfloat16)
             if device.type == "cuda"
             else contextlib.nullcontext(),
         ):
-            output = self.forward(
+            output = self(
                 sequence_tokens=input.sequence,
                 structure_tokens=input.structure,
                 ss8_tokens=input.secondary_structure,
@@ -538,7 +554,11 @@ class ESM3(nn.Module, ESM3InferenceClient):
             )
 
         output = ESMOutput(
-            **{k: v.to(device).to(torch.float32) for k, v in vars(output).items()}
+            **{
+                k: v.to(device).to(torch.float32)
+                for k, v in vars(output).items()
+                if v is not None
+            }
         )
 
         return LogitsOutput(

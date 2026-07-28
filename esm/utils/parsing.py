@@ -41,7 +41,7 @@ def read_sequences(path: PathOrBuffer) -> Generator[FastaEntry, None, None]:
     # Doesn't use explicit isinstance check to support
     # inputs that are not explicitly str/Path/TextIOBase but
     # may support similar functionality
-    data = None  # type: ignore
+    data = None
     try:
         if str(path).endswith(".gz"):
             import gzip
@@ -61,6 +61,35 @@ def read_sequences(path: PathOrBuffer) -> Generator[FastaEntry, None, None]:
 
 def read_first_sequence(path: PathOrBuffer) -> FastaEntry:
     return next(iter(read_sequences(path)))
+
+
+def count_fasta_sequences(path: str | Path) -> int:
+    """Count sequences in a FASTA file by counting header lines.
+
+    Faster than parsing the full file — only scans for '>' prefixes.
+    Returns 0 if the file does not exist.
+    """
+    path = Path(path)
+    if not path.exists():
+        return 0
+    with open(path) as f:
+        return sum(1 for line in f if line.startswith(">"))
+
+
+def append_fasta_sequence(header: str, sequence: str, path: str | Path) -> None:
+    """Append a single sequence to a FASTA file (creating it if needed)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # The existing file may not end with a newline (e.g., write_sequences()
+    # explicitly avoids writing a newline at the end), so we insert one before
+    # appending to avoid merging with the last line.
+    needs_newline = (
+        path.exists() and path.stat().st_size > 0 and path.read_bytes()[-1:] != b"\n"
+    )
+    with open(path, "a") as f:
+        if needs_newline:
+            f.write("\n")
+        f.write(f">{header}\n{sequence}\n")
 
 
 def write_sequences(sequences: Iterable[tuple[str, str]], path: PathOrBuffer) -> None:

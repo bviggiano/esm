@@ -168,9 +168,6 @@ def sample_logits(
             "Can not sample logits if there are no valid ids to sample from."
         )
 
-    if top_p < 1.0:
-        logits = top_p_logits(logits, top_p=top_p)
-
     temperature = _tensorize_like(temperature, logits)
     batch_dims = logits.size()[:-1]
     logits = logits.reshape(-1, logits.shape[-1])
@@ -181,6 +178,10 @@ def sample_logits(
         mask = torch.ones_like(logits, dtype=torch.bool)
         mask[..., valid_ids] = False
         logits[mask] = -torch.inf
+
+    # we mask invalid_ids BEFORE top_p
+    if top_p < 1.0:
+        logits = top_p_logits(logits, top_p=top_p)
 
     if torch.all(temperature == 0):
         ids = logits.argmax(-1)
@@ -284,6 +285,9 @@ def sample_sasa_logits(
     sasa_value[max_prob_idx == 18] = float("inf")
     sasa_value[~sampling_mask] = float("inf")
 
+    # Set BOS and EOS tokens to 0
+    sasa_value[..., 0] = 0.0
+    sasa_value[..., -1] = 0.0
     return sasa_value
 
 

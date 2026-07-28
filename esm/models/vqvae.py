@@ -247,7 +247,7 @@ class StructureTokenEncoder(nn.Module):
 
         z = self.relative_positional_embedding(res_idxs[:, 0], res_idxs)
 
-        z, _, _ = self.transformer.forward(
+        z, _, _, _ = self.transformer.forward(
             x=z,
             sequence_id=knn_sequence_id,
             affine=affine,
@@ -280,7 +280,7 @@ class StructureTokenEncoder(nn.Module):
                 (coords.shape[0], coords.shape[1]), device=coords.device
             ).long()
 
-        with torch.no_grad(), torch.cuda.amp.autocast(enabled=False):  # type: ignore
+        with torch.no_grad(), torch.amp.autocast("cuda", enabled=False):
             ca = coords[..., 1, :]
             edges, edge_mask = knn_graph(
                 ca, coord_mask, padding_mask, sequence_id, no_knn=knn
@@ -394,7 +394,7 @@ class StructureTokenDecoder(nn.Module):
 
         x = self.embed(structure_tokens)
         # !!! NOTE: Attention mask is actually unused here so watch out
-        x, _, _ = self.decoder_stack.forward(
+        x, _, _, _ = self.decoder_stack.forward(
             x, affine=None, affine_mask=None, sequence_id=sequence_id, chain_id=chain_id
         )
 

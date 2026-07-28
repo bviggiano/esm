@@ -26,7 +26,12 @@ from esm.utils.structure.affine3d import Affine3D
 from esm.utils.structure.aligner import Aligner
 from esm.utils.structure.atom_indexer import AtomIndexer
 from esm.utils.structure.metrics import compute_gdt_ts, compute_lddt_ca
-from esm.utils.structure.mmcif_parsing import MmcifWrapper, Residue
+from esm.utils.structure.mmcif_parsing import (
+    PLDDT_B_FACTOR_SCALE,
+    MmcifWrapper,
+    Residue,
+    round_mmcif_columns,
+)
 from esm.utils.structure.normalize_coordinates import (
     apply_frame_to_coords,
     get_protein_normalization_frame,
@@ -36,6 +41,22 @@ from esm.utils.types import PathOrBuffer
 
 msgpack_numpy.patch()
 CHAIN_ID_CONST = "A"
+
+
+def _str_key_to_int_key(dct: dict, ignore_keys: list[str] | None = None) -> dict:
+    new_dict = {}
+    for k, v in dct.items():
+        v_new = v
+        if k not in ignore_keys and isinstance(  # ty:ignore[unsupported-operator]
+            v, dict
+        ):
+            v_new = _str_key_to_int_key(v, ignore_keys=ignore_keys)
+        # Note assembly_composition is *supposed* to have string keys.
+        if isinstance(k, str) and k.isdigit():
+            new_dict[int(k)] = v_new
+        else:
+            new_dict[k] = v_new
+    return new_dict
 
 
 def _num_non_null_residues(seqres_to_structure_chain: Mapping[int, Residue]) -> int:
@@ -111,7 +132,7 @@ def chain_to_ndarray(
                 )
                 atom_mask[res_index, residue_constants.atom_order[atom_name]] = True
                 if is_predicted and atom_name == "CA":
-                    confidence[res_index] = atom.b_factor
+                    confidence[res_index] = atom.b_factor / PLDDT_B_FACTOR_SCALE
 
     assert all(sequence), "Some residue name was not specified correctly"
     return (
@@ -139,6 +160,7 @@ class ProteinChain:
     atom37_mask: np.ndarray
     confidence: np.ndarray
     mmcif: MmcifWrapper | None = None
+    atom37_confidence: np.ndarray | None = None  # [L, 37] per-atom pLDDT
 
     def __post_init__(self):
         assert self.atom37_mask.dtype == bool, self.atom37_mask.dtype
@@ -162,6 +184,11 @@ class ProteinChain:
             self.confidence.shape,
             len(self.sequence),
         )
+        if self.atom37_confidence is not None:
+            assert self.atom37_confidence.shape == self.atom37_mask.shape, (
+                self.atom37_confidence.shape,
+                self.atom37_mask.shape,
+            )
 
     @cached_property
     def atoms(self) -> AtomIndexer:
@@ -174,15 +201,29 @@ class ProteinChain:
     @cached_property
     def atom_array(self) -> bs.AtomArray:
         atoms = []
-        for res_name, res_idx, ins_code, positions, mask, conf in zip(
-            self.sequence,
-            self.residue_index,
-            self.insertion_code,
-            self.atom37_positions,
-            self.atom37_mask.astype(bool),
-            self.confidence,
+        for res_idx_i, (
+            res_name,
+            res_idx,
+            ins_code,
+            positions,
+            mask,
+            conf,
+        ) in enumerate(
+            zip(
+                self.sequence,
+                self.residue_index,
+                self.insertion_code,
+                self.atom37_positions,
+                self.atom37_mask.astype(bool),
+                self.confidence,
+            )
         ):
             for i, pos in zip(np.where(mask)[0], positions[mask]):
+                b_factor = (
+                    self.atom37_confidence[res_idx_i, i]
+                    if self.atom37_confidence is not None
+                    else conf
+                )
                 atom = bs.Atom(
                     coord=pos,
                     chain_id="A" if self.chain_id is None else self.chain_id,
@@ -192,7 +233,8 @@ class ProteinChain:
                     hetero=False,
                     atom_name=residue_constants.atom_types[i],
                     element=residue_constants.atom_types[i][0],
-                    b_factor=conf,
+                    b_factor=float(b_factor) * PLDDT_B_FACTOR_SCALE,
+                    occupancy=1.0,  # Necessary for BioPython MMCIFParser
                 )
                 atoms.append(atom)
         return bs.array(atoms)
@@ -213,6 +255,11 @@ class ProteinChain:
             )
         ):
             for i, pos in zip(np.where(mask)[0], positions[mask]):
+                b_factor = (
+                    self.atom37_confidence[res_idx, i]
+                    if self.atom37_confidence is not None
+                    else conf
+                )
                 atom = bs.Atom(
                     coord=pos,
                     # hard coded to as we currently only support single chain structures
@@ -222,7 +269,8 @@ class ProteinChain:
                     hetero=False,
                     atom_name=residue_constants.atom_types[i],
                     element=residue_constants.atom_types[i][0],
-                    b_factor=conf,
+                    b_factor=float(b_factor) * PLDDT_B_FACTOR_SCALE,
+                    occupancy=1.0,  # Necessary for BioPython MMCIFParser
                 )
                 atoms.append(atom)
         return bs.array(atoms)
@@ -242,6 +290,9 @@ class ProteinChain:
             atom37_positions=self.atom37_positions[..., idx, :, :],
             atom37_mask=self.atom37_mask[..., idx, :],
             confidence=self.confidence[..., idx],
+            atom37_confidence=self.atom37_confidence[..., idx, :]
+            if self.atom37_confidence is not None
+            else None,
         )
 
     def __len__(self):
@@ -317,7 +368,9 @@ class ProteinChain:
                 data=CIFData(array=["2"] * len(self.residue_index), dtype=np.str_)
             ),
             "metric_value": CIFColumn(
-                data=CIFData(array=self.confidence, dtype=np.float32)
+                data=CIFData(
+                    array=self.confidence * PLDDT_B_FACTOR_SCALE, dtype=np.float32
+                )
             ),
             # hard coded to show there are the initial version, there are no revisions
             "model_id": CIFColumn(
@@ -327,6 +380,9 @@ class ProteinChain:
         f.block["ma_qa_metric_local"] = CIFCategory(
             name="ma_qa_metric_local", columns=resid_pldd_table
         )
+        # biotite echoes unmasked float columns at full precision
+        # so we round every float column to conventional mmCIF precision
+        round_mmcif_columns(f)
         f.write(path)
 
     def to_mmcif_string(self) -> str:
@@ -343,6 +399,10 @@ class ProteinChain:
         if backbone_only:
             dct["atom37_mask"][:, 3:] = False
         dct["atom37_positions"] = dct["atom37_positions"][dct["atom37_mask"]]
+        if dct.get("atom37_confidence") is not None:
+            dct["atom37_confidence"] = dct["atom37_confidence"][dct["atom37_mask"]]
+        else:
+            dct.pop("atom37_confidence", None)
 
         for k, v in dct.items():
             if isinstance(v, np.ndarray):
@@ -366,6 +426,9 @@ class ProteinChain:
 
     @classmethod
     def from_state_dict(cls, dct):
+        # Note: assembly_composition is *supposed* to have string keys.
+        dct = _str_key_to_int_key(dct, ignore_keys=["assembly_composition"])
+
         for k, v in dct.items():
             if isinstance(v, list):
                 dct[k] = np.array(v)
@@ -373,9 +436,18 @@ class ProteinChain:
         atom37 = np.full((*dct["atom37_mask"].shape, 3), np.nan)
         atom37[dct["atom37_mask"]] = dct["atom37_positions"]
         dct["atom37_positions"] = atom37
+        if "atom37_confidence" in dct:
+            atom37_conf = np.full(dct["atom37_mask"].shape, np.nan, dtype=np.float32)
+            atom37_conf[dct["atom37_mask"]] = dct["atom37_confidence"]
+            dct["atom37_confidence"] = atom37_conf
         dct = {
-            k: (v.astype(np.float32) if k in ["atom37_positions", "confidence"] else v)
+            k: (
+                v.astype(np.float32)
+                if k in ["atom37_positions", "confidence", "atom37_confidence"]
+                else v
+            )
             for k, v in dct.items()
+            if not (k == "atom37_confidence" and v is None)
         }
         return cls(**dct, mmcif=None)
 
@@ -395,7 +467,7 @@ class ProteinChain:
 
     def sasa(self, by_residue: bool = True):
         arr = self.atom_array_no_insertions
-        sasa_per_atom = bs.sasa(arr)  # type: ignore
+        sasa_per_atom = bs.sasa(arr)
         if by_residue:
             # Sum per-atom SASA into residue "bins", with np.bincount.
             assert arr.res_id is not None
@@ -487,7 +559,7 @@ class ProteinChain:
                 assert len(sap_by_residue) == len(self)
                 return sap_by_residue
             case "protein":
-                return sum(sap_by_atom[sap_by_atom > 0])  # pyright: ignore[reportReturnType]
+                return sum(sap_by_atom[sap_by_atom > 0])
             case _:
                 raise ValueError(
                     f"Invalid aggregation method: {aggregation}. Must be one of 'atom', 'residue', or 'protein'"
@@ -502,8 +574,9 @@ class ProteinChain:
         # https://www.mdpi.com/2073-4352/11/12/1539
         # NOTE(@zeming): due to the approximation we make here, that atoms never overlap, you might get >1 globularity
         mask = self.atom37_mask.any(-1)
+        assert isinstance(mask, np.ndarray)
         points = self.atom37_positions[self.atom37_mask]
-        sequence = [aa for aa, m in zip(self.sequence, mask) if m]  # type: ignore
+        sequence = [aa for aa, m in zip(self.sequence, mask) if m]
         A, _ = self._mvee(points, tol=1e-3)
         mvee_volume = (4 * np.pi) / (3 * np.sqrt(np.linalg.det(A)))
         volume = sum(residue_constants.amino_acid_volumes[x] for x in sequence)
@@ -896,7 +969,7 @@ class ProteinChain:
 
         return cls(
             id=id,
-            sequence=sequence,  # type: ignore
+            sequence=sequence,
             chain_id=chain_id,
             entity_id=entity_id,
             atom37_positions=atom37_positions,
@@ -1023,7 +1096,7 @@ class ProteinChain:
                     )
                     atom_mask[i, residue_constants.atom_order[atom_name]] = True
                     if is_predicted and atom_name == "CA":
-                        confidence[i] = atom.b_factor
+                        confidence[i] = atom.b_factor / PLDDT_B_FACTOR_SCALE
 
         assert all(sequence), "Some residue name was not specified correctly"
 
@@ -1063,7 +1136,7 @@ class ProteinChain:
         entity_id: int | None = None,
         keep_source: bool = False,
     ) -> ProteinChain:
-        f: io.StringIO = rcsb.fetch(pdb_id, "cif")  # type: ignore
+        f: io.StringIO = rcsb.fetch(pdb_id, "cif")
         return cls.from_mmcif(
             f,
             id=pdb_id,
@@ -1081,7 +1154,7 @@ class ProteinChain:
         Uses PDB file format as intermediate."""
         atom_array = atom_array.copy()
         atom_array.box = None  # remove surrounding box, from_pdb won't handle this
-        pdb_file = PDBFile()  # pyright: ignore
+        pdb_file = PDBFile()
         pdb_file.set_structure(atom_array)
 
         buf = io.StringIO()
