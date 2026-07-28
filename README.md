@@ -4,12 +4,12 @@
 # A world model of protein biology: ESMC, ESMFold2, & ESM Atlas
 
 
-[ESMC & ESMFold2 Preprint](https://biohub.ai/papers/esm_protein.pdf) &sdot;  [Atlas](https://biohub.ai/esm/protein/atlas) &sdot; [Tutorials](https://github.com/Biohub/esm/tree/main/cookbook/tutorials) &sdot; [Slack](https://bit.ly/esm-slack)<br>
+[ESMC & ESMFold2 Preprint](https://www.biorxiv.org/content/10.64898/2026.06.03.729735) &sdot;  [Atlas](https://biohub.ai/esm/protein/atlas) &sdot; [Tutorials](https://github.com/Biohub/esm/tree/main/cookbook/tutorials) &sdot; [Slack](https://bit.ly/esm-slack)<br>
 </div>
 
 We are releasing a world model for protein biology: a scientific engine for prediction, design, and discovery. Built on the latest generation of Evolutionary Scale Modeling (ESM), this system learns from the protein sequences produced by evolution and uses that knowledge to represent, map, predict, and design proteins across scales — from atomic interactions to evolutionary relationships spanning billions of years. The system includes three artifacts: ESMC, ESMFold2, and ESM Atlas.
 
-**[ESMC](https://biohub.ai/esm/protein)** is a state-of-the-art protein language model that has learned the rules of protein biology from training on billions of protein sequences. ESMC defines a new scaling frontier relative to ESM2, achieving stronger performance in emergent long-range structural understanding as model scale increases
+**[ESMC](https://biohub.ai/esm/protein)** is a state-of-the-art protein language model that has learned the rules of protein biology from training on billions of protein sequences. ESMC defines a new scaling frontier relative to ESM2, achieving stronger performance in emergent long-range structural understanding as model scale increases.
 
 
 <div align="center">
@@ -18,14 +18,14 @@ We are releasing a world model for protein biology: a scientific engine for pred
 
 
 
-**[ESMFold2](https://huggingface.co/Biohub/ESMFold2)**, built on the ESMC 6B model, is a state-of-the-art structure prediction model that has been validated for the design of protein-protein interactions. ESMFold2 surpasses other models in DockQ pass-rate on Foldbench protein-protein and antibody-antigen complexes, and can be used in single-sequence mode for an order of magnitude speedup in folding.
+**[ESMFold2](https://huggingface.co/biohub/ESMFold2)**, built on the ESMC 6B model, is a state-of-the-art structure prediction model that has been validated for the design of protein-protein interactions. ESMFold2 surpasses other models in DockQ pass-rate on Foldbench protein-protein and antibody-antigen complexes, and can be used in single-sequence mode for an order of magnitude speedup in folding.
 
 <div align="center">
-  <img src="_assets/esmfold2_folding.png" width="40%"/>
+  <img src="_assets/esmfold2_folding.png" width="60%"/>
 </div>
 
 
-ESMFold2 is validated in the lab across five therapeutic targets. Inversion of ESMFold2 enables generation of de novo minibinders and antibody-derived scFvs with high hit rates, nanomolar affinities, target specificity, and functional activity. We're planning to release a notebook that walks through the full design loop from target sequence to ranked binder candidates. The full protocol is also described in the [preprint](https://biohub.ai/papers/esm_protein.pdf).
+ESMFold2 is validated in the lab across five therapeutic targets. Inversion of ESMFold2 enables generation of de novo minibinders and antibody-derived scFvs with high hit rates, nanomolar affinities, target specificity, and functional activity. We've released the full protocol from target sequence to ranked binder design in this [notebook](https://github.com/Biohub/esm/blob/main/cookbook/tutorials/binder_design.ipynb). For additional details, please refer to the [preprint](https://www.biorxiv.org/content/10.64898/2026.06.03.729735).
 
 <div align="center">
   <img src="_assets/esmfold2_binder.png" width="60%"/>
@@ -50,14 +50,20 @@ For information on using ESM3, see the [ESM3 README](https://github.com/Biohub/e
 
 [ESMC](https://biohub.ai/esm/protein) is a state-of-the-art protein language model that has learned representations of protein biology from training on billions of protein sequences.
 
-Codebase, model weights, and model variants for ESMC are available through [Hugging Face](https://huggingface.co/collections/Biohub/esmc-model-family).
+Codebase, model weights, and model variants for ESMC are available through [Hugging Face](https://huggingface.co/collections/biohub/esmc-model-family).
 
 There are two primary ways of running the ESM models: through the [**Biohub Platform**](https://biohub.ai/) or locally with Hugging Face. The Biohub Platform enables users to easily run inference with ESM models with minimal setup. Users interested in customizing or fine-tuning ESM models can use the models from Hugging Face.
 
-### Running ESMC Locally
-<a name="running-esmc-locally"></a>
+### Running ESMC Through Hugging Face
+<a name="running-esmc-through-hugging-face"></a>
 
-The following code demonstrates how to run ESMC locally
+First, install `esm` from GitHub (a PyPI release is coming soon):
+
+```
+pip install esm@git+https://github.com/Biohub/esm.git@main
+```
+
+Then use the following code to run ESMC using the Transformers library via Hugging Face:
 
 ```python
 import torch
@@ -71,10 +77,10 @@ login()
 sequences = ["MSKGEELFTGVVPILVELDGDVNGHKFSVSGEGEGDATYGKLTLKFICTTGKLPVPWPTLVTTFSYGVQCFSRYPDHMKQHDFFKSAMPEGYVQERTIFFKDDGNYKTRAEVKFEGDTLVNRIELKGIDFKEDGNILGHKLEYNYNSHNVYIMADKQKNGIKVNFKIRHNIEDGSVQLADHYQQNTPIGDGPVLLPDNHYLSTQSALSKDPNEKRDHMVLLEFVTAAGITHGMDELYK"]
 
 model = AutoModelForMaskedLM.from_pretrained(
-    "Biohub/ESMC-6B",
+    "biohub/ESMC-6B",
     device_map="auto",
 ).eval()
-tokenizer = AutoTokenizer.from_pretrained("Biohub/ESMC-6B")
+tokenizer = AutoTokenizer.from_pretrained("biohub/ESMC-6B")
 
 inputs = tokenizer(sequences, return_tensors="pt", padding=True)
 inputs = {k: v.to(model.device) for k, v in inputs.items()}
@@ -97,21 +103,31 @@ Note that our API migrated from forge.evolutionaryscale.ai to [biohub.ai](https:
 To get started with ESM, install the python library using `pip`:
 
 ```
-pip install esm
+pip install esm@git+https://github.com/Biohub/esm.git@main
 ```
 
 Then import the necessary libraries and instantiate your desired model.
 
 ```py
 from esm.sdk import esmc_client
+from esm.sdk.api import ESMProtein, LogitsConfig
 
+# Human carbonic anhydrase II (PDB 2CBA)
+protein = ESMProtein(
+    sequence=(
+        "MSHHWGYGKHNGPEHWHKDFPIAKGERQSPVDIDTHTAKYDPSLKPLSVSYDQATSLRILNNGHAFNVEFDD"
+        "SQDKAVLKGGPLDGTYRLIQFHFHWGSLDGQGSEHTVDKKKYAAELHLVHWNTKYGDFGKAVQQPDGLAVL"
+        "GIFLKVGSAKPGLQKVVDVLDSIKTKGKSADFTNFDPRGLLPESLDYWTYPGSLTTPPLLECVTWIVLKEP"
+        "ISVSSEQVLKFRKLNFNGEGEPEELMVDNWRPAQPLKNRQIKASFK"
+    )
+)
 model = esmc_client(
     model="esmc-600m-2024-12", url="https://biohub.ai", token="<your API token>"
 )
 
 protein_tensor = model.encode(protein)
 logits_output = model.logits(
-  protein_tensor, LogitsConfig(sequence=True, return_embeddings=True)
+    protein_tensor, LogitsConfig(sequence=True, return_embeddings=True)
 )
 
 print(logits_output.logits, logits_output.embeddings)
@@ -128,16 +144,26 @@ The sparse autoencoder used in the Atlas and analyzed in the paper, `ESMC-6B-sae
 
 Codebase, model weights, and model variants for ESMC SAEs are available through [Hugging Face](https://huggingface.co/collections/biohub/esmc-saes-for-hidden-states-all-layers).
 
+### Running SAEs Through Hugging Face
+
+First, install `esm` from GitHub (a PyPI release is coming soon):
+
+```
+pip install esm@git+https://github.com/Biohub/esm.git@main
+```
+
+Then use the following code to set up an ESMC SAE using the Transformers library via Hugging Face:
+
 ```python
 import torch
 from transformers import AutoModel, AutoTokenizer
 
 sequence = "MGSNKSKPKDASQRRRSLEPAENVHGAGGGAFPASQTPSKPASADGHRGPSAAFAPAAAEPKLFGGFNSSDTVTSPQRAGPLAGGVTTFVALYDYESRTETDLSFKKGERLQIVNNTEGDWWLAHSLSTGQTGYIPSNYVAPSDSIQAEEWYFGKITRRESERLLLNAENPRGTFLVRESETTKGAYCLSVSDFDNAKGLNVKHYKIRKLDSGGFYITSRTQFNSLQQLVAYYSKHADGLCHRLTTVCPTSKPQTQGLAKDAWEIPRESLRLEVKLGQGCFGEVWMGTWNGTTRVAIKTLKPGTMSPEAFLQEAQVMKKLRHEKLVQLYAVVSEEPIYIVTEYMSKGSLLDFLKGETGKYLRLPQLVDMAAQIASGMAYVERMNYVHRDLRAANILVGENLVCKVADFGLARLIEDNEYTARQGAKFPIKWTAPEAALYGRFTIKSDVWSFGILLTELTTKGRVPYPGMVNREVLDQVERGYRMPCPPECPESLHDLMCQCWRKEPEERPTFEYLQAFLEDYFTSTEPQYQPGENL"
 
-model = AutoModel.from_pretrained("Biohub/ESMC-6B", device_map="auto").eval()
-tokenizer = AutoTokenizer.from_pretrained("Biohub/ESMC-6B")
+model = AutoModel.from_pretrained("biohub/ESMC-6B", device_map="auto").eval()
+tokenizer = AutoTokenizer.from_pretrained("biohub/ESMC-6B")
 sae = AutoModel.from_pretrained(
-    "Biohub/ESMC-6B-sae-k64-codebook16384",
+    "biohub/ESMC-6B-sae-k64-codebook16384",
     allow_patterns=["config.json", "layer_30.safetensors", "layer_60.safetensors"],
     device=model.device,
 )
@@ -154,19 +180,30 @@ output["sae_outputs"]["layer60"]  # sparse.coo tensor
 print(output["sae_outputs"]["layer60"].shape)
 
 ```
+### Running SAEs Through The Biohub Platform
 
-For tutorials on how to use ESMC SAEs, see our [tutorials](https://github.com/Biohub/esm/tree/main/cookbook/tutorials).
+For a tutorial on using SAEs using the Biohub Platform, see [here](https://github.com/Biohub/esm/blob/main/cookbook/tutorials/esmc_sae_feature_interpretation.ipynb).
 
 ## ESMFold2
 <a name="esmfold2"></a>
 
-[ESMFold2](https://huggingface.co/Biohub/ESMFold2) is a state-of-the-art protein structure prediction model that combines ESMC (6B parameter) language model embeddings with a diffusion-based structure prediction architecture.
+
+[ESMFold2](https://huggingface.co/biohub/ESMFold2) is a state-of-the-art protein structure prediction model that combines ESMC (6B parameter) language model embeddings with a diffusion-based structure prediction architecture.
 
 The model predicts high-resolution, all-atom 3D protein structures directly from amino acid sequences, with optional multiple sequence alignment (MSA) input for enhanced accuracy on challenging targets. ESMFold2 achieves state-of-the-art performance matching or exceeding AlphaFold3 across diverse evaluation datasets, while offering improved computational efficiency through optimized diffusion sampling and architectural innovations.
 
-Codebase, model weights, and model variants for ESMFold2 are available through [Hugging Face](https://huggingface.co/collections/biohub/esmfold2-model-family)
+Codebase, model weights, and model variants for ESMFold2 are available through [Hugging Face](https://huggingface.co/biohub/ESMFold2)
 
-### Running ESMFold2 Locally
+### Running ESMFold2 Through Hugging Face
+<a name="running-esmfold2-through-hugging-face"></a>
+
+First, install `esm` from GitHub (a PyPI release is coming soon):
+
+```
+pip install esm@git+https://github.com/Biohub/esm.git@main
+```
+
+Then use the following code to run ESMFold2 locally using the Transformers library via Hugging Face:
 
 ```python
 from esm.models.esmfold2 import (
@@ -207,7 +244,7 @@ spi = StructurePredictionInput(
 )
 
 result = ESMFold2InputBuilder().fold(
-    model, spi, num_loops=3, num_sampling_steps=50, num_diffusion_samples=1, seed=0
+    model, spi, num_loops=20, num_sampling_steps=100, num_diffusion_samples=1, seed=0
 )
 
 print(f"pLDDT mean: {float(result.plddt.mean()):.3f}, pTM: {float(result.ptm):.3f}, ipTM: {float(result.iptm):.3f}")
@@ -216,19 +253,22 @@ with open("1mht_pred.cif", "w") as f:
     f.write(result.complex.to_mmcif())
 ```
 
+> **AMD ROCm users:** use ROCm 6.4 with PyTorch 2.9 or newer.
+
 ### Running ESMFold2 Through the Biohub Platform
 
-Install the  `esm` Python package
+Install the `esm` Python package
 
 ```
-pip install esm
+pip install esm@git+https://github.com/Biohub/esm.git@main
 ```
 
 Import the necessary libraries.
 
 ```py
 from esm.sdk.forge import SequenceStructureForgeInferenceClient
-from esm.sdk.api import ESMProtein, ESMProteinError, LogitsConfig, LogitsOutput
+from esm.sdk.api import FoldingConfig
+from esm.utils.structure.input_builder import ProteinInput, StructurePredictionInput
 ```
 
 Call the inference client with the selected model of choice and replace <your API token> with your token name.
@@ -236,13 +276,22 @@ Call the inference client with the selected model of choice and replace <your AP
 ```py
 client = SequenceStructureForgeInferenceClient(model="esmfold2-fast-2026-05", url="https://biohub.ai", token="<your API token>")
 
-gfp_sequence = "MSKGEELFTGVVPILVELDGDVNGHKFSVRGEGEGDATNGKLTLKFICTTGKLPVPWPTLVTTLTYGVQCFSRYPDHMKRHDFFKSAMPEGYVQERTISFKDDGTYKTRAEVKFEGDTLVNRIELKGIDFKEDGNILGHKLEYNFNSHNVYITADKQKNGIKANFKIRHNVEDGSVQLADHYQQNTPIGDGPVLLPDNHYLSTQSVLSKDPNEKRDHMVLLEFVTAAGITHGMDELYK"
-gfp_input = input_builder.StructurePredictionInput(
-    sequences=[gfp_sequence]
+# Human carbonic anhydrase II (PDB 2CBA)
+ca2_sequence = (
+    "MSHHWGYGKHNGPEHWHKDFPIAKGERQSPVDIDTHTAKYDPSLKPLSVSYDQATSLRILNNGHAFNVEFDD"
+    "SQDKAVLKGGPLDGTYRLIQFHFHWGSLDGQGSEHTVDKKKYAAELHLVHWNTKYGDFGKAVQQPDGLAVL"
+    "GIFLKVGSAKPGLQKVVDVLDSIKTKGKSADFTNFDPRGLLPESLDYWTYPGSLTTPPLLECVTWIVLKEP"
+    "ISVSSEQVLKFRKLNFNGEGEPEELMVDNWRPAQPLKNRQIKASFK"
+)
+ca2_input = StructurePredictionInput(
+    sequences=[ProteinInput(id="A", sequence=ca2_sequence)]
 )
 
-config = FoldingConfig(num_loops=3, num_sampling_steps=32, seed=0)
-result = client.fold_all_atom(gfp_input, config=config)
+config = FoldingConfig(
+    num_loops=20,
+    num_sampling_steps=100
+)
+result = client.fold_all_atom(ca2_input, config=config)
 
 with open("result.cif", "w") as f:
     f.write(result.complex.to_mmcif())
@@ -260,7 +309,7 @@ Informed by our risk assessments, we are releasing the source code and model wei
 
 Evaluations: Prior to release, we conducted evaluations to inform our understanding of capability uplift for specific misuse-relevant functional tasks. The full details of these evaluations are available in our corresponding paper appendix.
 
-The Biohub Platform: We implement guardrails that detect and restrict the use of keywords and sequences corresponding to controlled pathogens and toxins on our freely accessible platform. For further details regarding these guardrails, please refer to our Biohub Platform Resources page. We recognize there are many legitimate reasons to use AI models to understand and model these sequences and proteins. If you are a researcher whose work is impacted by these guardrails, you can request elevated access to our platform via [Biohub.ai](http://Biohub.ai).
+The Biohub Platform: We implement guardrails that detect and restrict the use of keywords and sequences corresponding to controlled pathogens and toxins on our freely accessible platform. For further details regarding these guardrails, please refer to our Biohub Platform Resources page. We recognize there are many legitimate reasons to use AI models to understand and model these sequences and proteins. If you are a researcher whose work is impacted by these guardrails, you can request elevated access to our platform via [biohub.ai](https://biohub.ai).
 
 Please follow our [Acceptable Use Policy](https://biohub.org/acceptable-use-policy/) when using the model.
 
@@ -292,7 +341,7 @@ If you use ESM in your work, please cite one of the following:
             and Pannu, Jassi and Bachas, Sharrol and Liu, Daniel S.
             and Sercu, Tom and Rives, Alexander},
   year   = {2026},
-  url    = {https://biohub.ai/papers/esm_protein.pdf},
+  url    = {https://www.biorxiv.org/content/10.64898/2026.06.03.729735},
   note   = {Preprint}
 }
 ```

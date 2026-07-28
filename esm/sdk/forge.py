@@ -30,8 +30,13 @@ from esm.sdk.api import (
 from esm.sdk.base_forge_client import _BaseForgeInferenceClient
 from esm.sdk.retry import retry_decorator
 from esm.utils.constants.api import MIMETYPE_ES_PICKLE
-from esm.utils.constants.models import ESMFOLD2_FAST, ESMFOLD2_MAX_MSA_SEQS
-from esm.utils.misc import deserialize_tensors, maybe_list, maybe_tensor
+from esm.utils.constants.models import (
+    DEFAULT_ESMFOLD2_FAST_LM_MASK_PCT,
+    ESMFOLD2,
+    ESMFOLD2_FAST,
+    ESMFOLD2_MAX_MSA_SEQS,
+)
+from esm.utils.misc import deserialize_tensors, maybe_list, maybe_tensor, to_float32
 from esm.utils.msa import MSA
 from esm.utils.structure.input_builder import (
     ProteinInput,
@@ -50,6 +55,18 @@ MSAInput: TypeAlias = Union[
     None,
 ]
 # fmt: on
+
+
+def _resolve_lm_mask_pct(lm_mask_pct: float | None, model_name: str | None) -> float:
+    f"""
+    An explicit value is always honored. When unset (``None``),
+    {ESMFOLD2_FAST} (or no model name) defaults to 0.1,
+    {ESMFOLD2} defaults to 0.0.
+    """
+    if lm_mask_pct is not None:
+        return lm_mask_pct
+    is_fast_or_default = model_name is None or model_name == ESMFOLD2_FAST
+    return DEFAULT_ESMFOLD2_FAST_LM_MASK_PCT if is_fast_or_default else 0.0
 
 
 def _list_to_function_annotations(l) -> list[FunctionAnnotation] | None:
@@ -88,7 +105,7 @@ class SequenceStructureForgeInferenceClient(_BaseForgeInferenceClient):
         url: str = "https://biohub.ai",
         model: str | None = None,
         token: str = "",
-        request_timeout: int | None = None,
+        request_timeout: int | None = 120,
         min_retry_wait: int = 1,
         max_retry_wait: int = 10,
         max_retry_attempts: int = 5,
@@ -100,7 +117,7 @@ class SequenceStructureForgeInferenceClient(_BaseForgeInferenceClient):
             url: URL of the Forge/Biohub Platform server.
             model: Name of the model to be used for folding / inv folding.
             token: API token.
-            request_timeout: Override the system default request timeout, in seconds.
+            request_timeout: Override the system default request timeout (120s), in seconds.
         """
         super().__init__(
             model=model or "",
@@ -140,7 +157,7 @@ class SequenceStructureForgeInferenceClient(_BaseForgeInferenceClient):
                     UserWarning,
                     stacklevel=4,
                 )
-            request["msa"] = {"sequences": msa.sequences}
+            request["msa"] = msa.state_dict(json_serializable=True)
         else:
             error_msg = f"MSA must be None or MSA. Got {msa} instead."
             raise AttributeError(error_msg)
@@ -150,6 +167,10 @@ class SequenceStructureForgeInferenceClient(_BaseForgeInferenceClient):
         request["include_pair_chains_iptm"] = config.include_pair_chains_iptm
         request["num_sampling_steps"] = config.num_sampling_steps
         request["num_loops"] = config.num_loops
+        request["lm_dropout"] = config.lm_dropout
+        request["lm_mask_pct"] = _resolve_lm_mask_pct(config.lm_mask_pct, model_name)
+        request["msa_max_depth"] = config.msa_max_depth
+        request["msa_column_mask_rate"] = config.msa_column_mask_rate
         request["include_embeddings"] = config.include_embeddings
 
         request["model"] = model_name
@@ -371,6 +392,10 @@ class SequenceStructureForgeInferenceClient(_BaseForgeInferenceClient):
         request["include_pae"] = config.include_pae
         request["num_sampling_steps"] = config.num_sampling_steps
         request["num_loops"] = config.num_loops
+        request["lm_dropout"] = config.lm_dropout
+        request["lm_mask_pct"] = _resolve_lm_mask_pct(config.lm_mask_pct, model_name)
+        request["msa_max_depth"] = config.msa_max_depth
+        request["msa_column_mask_rate"] = config.msa_column_mask_rate
         request["include_embeddings"] = config.include_embeddings
 
         return request
@@ -403,7 +428,7 @@ class SequenceStructureForgeInferenceClient(_BaseForgeInferenceClient):
         self,
         coordinates: torch.Tensor,
         config: InverseFoldingConfig,
-        potential_sequence_of_concern: bool,
+        potential_sequence_of_concern: bool = False,
         sequence: str | None = None,
         model_name: str | None = None,
     ) -> ESMProtein | ESMProteinError:
@@ -439,7 +464,7 @@ class SequenceStructureForgeInferenceClient(_BaseForgeInferenceClient):
         self,
         coordinates: torch.Tensor,
         config: InverseFoldingConfig,
-        potential_sequence_of_concern: bool,
+        potential_sequence_of_concern: bool = False,
         sequence: str | None = None,
         model_name: str | None = None,
     ) -> ESMProtein | ESMProteinError:
@@ -475,7 +500,7 @@ class ESM3ForgeInferenceClient(ESM3InferenceClient, _BaseForgeInferenceClient):
         model: str,
         url: str = "https://biohub.ai",
         token: str = "",
-        request_timeout: int | None = None,
+        request_timeout: int | None = 120,
         min_retry_wait: int = 1,
         max_retry_wait: int = 10,
         max_retry_attempts: int = 5,
@@ -516,6 +541,7 @@ class ESM3ForgeInferenceClient(ESM3InferenceClient, _BaseForgeInferenceClient):
             "condition_on_coordinates_only": config.condition_on_coordinates_only,
             "strategy": config.strategy,
             "temperature_annealing": config.temperature_annealing,
+            "only_compute_backbone_rmsd": config.only_compute_backbone_rmsd,
         }
         return request
 
@@ -561,6 +587,10 @@ class ESM3ForgeInferenceClient(ESM3InferenceClient, _BaseForgeInferenceClient):
             ),
             plddt=maybe_tensor(data["outputs"]["plddt"]),
             ptm=maybe_tensor(data["outputs"]["ptm"]),
+            pae=maybe_tensor(data["outputs"]["pae"]),
+            crmsd=maybe_tensor(data["outputs"]["crmsd"]),
+            globularity=maybe_tensor(data["outputs"]["globularity"]),
+            interface_ptm=maybe_tensor(data["outputs"]["interface_ptm"]),
         )
 
     @staticmethod
@@ -1121,7 +1151,7 @@ class ESMCForgeInferenceClient(ESMCInferenceClient, _BaseForgeInferenceClient):
         model: str,
         url: str = "https://biohub.ai",
         token: str = "",
-        request_timeout: int | None = None,
+        request_timeout: int | None = 60,
         min_retry_wait: int = 1,
         max_retry_wait: int = 10,
         max_retry_attempts: int = 5,
@@ -1192,11 +1222,13 @@ class ESMCForgeInferenceClient(ESMCInferenceClient, _BaseForgeInferenceClient):
             )
             sae_outputs = cast(dict[str, torch.Tensor] | None, sae_outputs)
         output = LogitsOutput(
-            logits=ForwardTrackData(sequence=_maybe_logits(data, "sequence")),
-            embeddings=maybe_tensor(data["embeddings"]),
-            mean_embedding=data["mean_embedding"],
-            hidden_states=maybe_tensor(data["hidden_states"]),
-            mean_hidden_state=maybe_tensor(data["mean_hidden_state"]),
+            logits=ForwardTrackData(
+                sequence=to_float32(_maybe_logits(data, "sequence"))
+            ),
+            embeddings=to_float32(maybe_tensor(data["embeddings"])),
+            mean_embedding=to_float32(data["mean_embedding"]),
+            hidden_states=to_float32(maybe_tensor(data["hidden_states"])),
+            mean_hidden_state=to_float32(maybe_tensor(data["mean_hidden_state"])),
             sae_outputs=sae_outputs,
         )
         return output
