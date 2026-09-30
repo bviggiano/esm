@@ -63,7 +63,6 @@ class GeometricReasoningOriginalImpl(nn.Module):
         )
 
         ns = self.s_norm(s)
-        # The frames are fp32 by design, so the geometric terms are computed in fp32.
         vec = self.proj(ns).float()
         vec_rot, vec_dist = vec.split(
             [

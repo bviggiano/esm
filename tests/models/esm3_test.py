@@ -1,8 +1,4 @@
-"""ESM3 in reduced precision.
-
-The published weights load in bf16, so every tensor ESM3 builds internally has to
-reach the bf16 layers in their own dtype.
-"""
+"""ESM3 in reduced precision."""
 
 import torch
 

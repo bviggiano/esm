@@ -106,7 +106,6 @@ class EncodeInputs(nn.Module):
         rbf_16_fn = partial(rbf, v_min=0.0, v_max=1.0, n_bins=16)
         # the `masked_fill(padding_mask.unsqueeze(2), 0)` for the two below is unnecessary
         # as pad tokens never even interact with the "real" tokens (due to sequence_id)
-        # rbf is computed in the pLDDT's own dtype; cast at the boundary so bf16 weights work
         dtype = self.plddt_projection.weight.dtype
         plddt_embed = self.plddt_projection(rbf_16_fn(average_plddt).to(dtype))
         structure_per_res_plddt = self.structure_per_res_plddt_projection(
