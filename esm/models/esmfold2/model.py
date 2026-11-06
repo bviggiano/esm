@@ -11,6 +11,8 @@ For multi-chain / ligand / MSA inputs see ``ESMFold2InputBuilder`` in the
 companion ``esm`` package.
 """
 
+import contextlib
+import functools
 import math
 from typing import cast
 
@@ -397,6 +399,22 @@ class ConfidenceHead(nn.Module):
 
 def _inverse_softplus(value: float) -> float:
     return value + math.log(-math.expm1(-value))
+
+
+def _inference_mode_unless_soft(fn):
+    """Run ``forward`` under inference mode unless a soft sequence asks for gradients.
+
+    Inference mode is stronger than ``no_grad``: tensors it produces cannot take part in
+    autograd at all, so a relaxed sequence would reach the distogram head with no graph behind
+    it. Discrete calls keep the original decorator's behaviour exactly.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        with torch.inference_mode(mode=kwargs.get("res_type_soft") is None):
+            return fn(self, *args, **kwargs)
+
+    return wrapper
 
 
 class EsmFold2Model(HubPreTrainedModel):
@@ -860,7 +878,7 @@ class EsmFold2Model(HubPreTrainedModel):
 
         return z
 
-    @torch.inference_mode()
+    @_inference_mode_unless_soft
     def forward(
         self,
         token_index: Tensor,
@@ -887,6 +905,9 @@ class EsmFold2Model(HubPreTrainedModel):
         msa_attention_mask: Tensor | None = None,
         input_ids: Tensor | None = None,
         lm_hidden_states: Tensor | None = None,
+        # Used in design to provide a soft sequence input.
+        res_type_soft: Tensor | None = None,
+        provide_soft_sequence_to_msa_and_profile: bool = True,
         num_loops: int | None = None,
         num_diffusion_samples: int | None = None,
         num_sampling_steps: int | None = None,
@@ -946,6 +967,17 @@ class EsmFold2Model(HubPreTrainedModel):
                 profile = msa_oh_profile.mean(dim=1)
         else:
             profile = res_type_oh
+
+        # Used in design to provide a soft sequence input.
+        if res_type_soft is not None:
+            res_type_oh = res_type_soft.float()
+            if (
+                not getattr(self.config, "disable_msa_features", False)
+                and provide_soft_sequence_to_msa_and_profile
+            ):
+                profile = res_type_oh
+                msa = res_type_oh.unsqueeze(1)
+                msa_attention_mask = tok_mask.unsqueeze(1)
 
         if deletion_mean is None:
             deletion_mean = torch.zeros(
@@ -1179,31 +1211,36 @@ class EsmFold2Model(HubPreTrainedModel):
             if _z_dt is not None:
                 del z  # free the full pair before the (sharded) structure phase
 
-        structure_output = self.structure_head.sample(
-            z_trunk=(_z_dt if _z_dt is not None else z),  # ty:ignore[invalid-argument-type]
-            s_inputs=x_inputs,
-            s_trunk=None,
-            relative_position_encoding=relative_position_encoding,
-            ref_pos=ref_pos,
-            ref_charge=ref_charge,
-            ref_mask=atm_mask,
-            ref_element=ref_element_oh,
-            ref_atom_name_chars=ref_atom_name_chars_oh,
-            ref_space_uid=ref_space_uid,
-            tok_idx=atom_to_token,
-            asym_id=asym_id,
-            residue_index=residue_index,
-            entity_id=entity_id,
-            token_index=token_index,
-            sym_id=sym_id,
-            token_attention_mask=tok_mask,
-            num_diffusion_samples=n_samples,
-            num_sampling_steps=num_sampling_steps,
-            noise_scale=noise_scale,
-            step_scale=step_scale,
-            max_inference_sigma=max_inference_sigma,
-            return_atom_repr=False,
-        )
+        # A soft sequence must not backpropagate through the sampler: its gradient path ends
+        # at the distogram head. Discrete input carries no gradient to fence, and wrapping the
+        # sampler changes which kernels run, which shifts its bf16 output, so the guard is
+        # applied only when a soft sequence is actually present.
+        with torch.no_grad() if res_type_soft is not None else contextlib.nullcontext():
+            structure_output = self.structure_head.sample(
+                z_trunk=(_z_dt if _z_dt is not None else z),  # ty:ignore[invalid-argument-type]
+                s_inputs=x_inputs,
+                s_trunk=None,
+                relative_position_encoding=relative_position_encoding,
+                ref_pos=ref_pos,
+                ref_charge=ref_charge,
+                ref_mask=atm_mask,
+                ref_element=ref_element_oh,
+                ref_atom_name_chars=ref_atom_name_chars_oh,
+                ref_space_uid=ref_space_uid,
+                tok_idx=atom_to_token,
+                asym_id=asym_id,
+                residue_index=residue_index,
+                entity_id=entity_id,
+                token_index=token_index,
+                sym_id=sym_id,
+                token_attention_mask=tok_mask,
+                num_diffusion_samples=n_samples,
+                num_sampling_steps=num_sampling_steps,
+                noise_scale=noise_scale,
+                step_scale=step_scale,
+                max_inference_sigma=max_inference_sigma,
+                return_atom_repr=False,
+            )
 
         sample_coords = structure_output["sample_atom_coords"]
         assert sample_coords is not None
