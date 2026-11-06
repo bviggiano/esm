@@ -13,6 +13,7 @@ companion ``esm`` package.
 
 import contextlib
 import functools
+import inspect
 import math
 from typing import cast
 
@@ -407,11 +408,20 @@ def _inference_mode_unless_soft(fn):
     Inference mode is stronger than ``no_grad``: tensors it produces cannot take part in
     autograd at all, so a relaxed sequence would reach the distogram head with no graph behind
     it. Discrete calls keep the original decorator's behaviour exactly.
+
+    ``res_type_soft`` is read positionally as well as by keyword. Missing it would not raise,
+    it would silently return a gradient-free result, so the check does not rely on the caller
+    choosing keyword form.
     """
+    # Position of res_type_soft among forward's parameters, counting self.
+    soft_index = list(inspect.signature(fn).parameters).index("res_type_soft")
 
     @functools.wraps(fn)
     def wrapper(self, *args, **kwargs):
-        with torch.inference_mode(mode=kwargs.get("res_type_soft") is None):
+        res_type_soft = kwargs.get("res_type_soft")
+        if res_type_soft is None and len(args) >= soft_index:
+            res_type_soft = args[soft_index - 1]
+        with torch.inference_mode(mode=res_type_soft is None):
             return fn(self, *args, **kwargs)
 
     return wrapper
