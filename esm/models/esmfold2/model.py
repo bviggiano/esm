@@ -44,6 +44,7 @@ from esm.models.esmfold2.layers import (
     TriangleMultiplicativeUpdate,
     _categorical_mean,
     _compute_intra_token_idx,
+    _seed_context,
     _to_fused_kernel_dtype,
     compute_lm_hidden_states,
     fast_trimul_refusal_reason,
@@ -844,10 +845,15 @@ class EsmFold2Model(HubPreTrainedModel):
                     max_depth=_msa_inputs["max_depth"],
                     enabled=_msa_inputs["subsample_enabled"],
                 )
-                B_msa, M, L_msa = msa_i.shape
-                msa_oh = F.one_hot(
-                    msa_i.permute(0, 2, 1).long(), num_classes=NUM_RES_TYPES
-                ).float()
+                if msa_i.dim() == 4:
+                    # The design path supplies a soft MSA row that is already one-hot shaped.
+                    B_msa, M, L_msa, _ = msa_i.shape
+                    msa_oh = msa_i.permute(0, 2, 1, 3).float()
+                else:
+                    B_msa, M, L_msa = msa_i.shape
+                    msa_oh = F.one_hot(
+                        msa_i.permute(0, 2, 1).long(), num_classes=NUM_RES_TYPES
+                    ).float()
                 msa_attn = (
                     mask_i.permute(0, 2, 1).float()
                     if mask_i is not None
@@ -930,6 +936,10 @@ class EsmFold2Model(HubPreTrainedModel):
         disto_cond: Tensor | None = None,
         disto_cond_mask: Tensor | None = None,
         include_embeddings: bool = False,
+        # Seeds the diffusion sampler, as the experimental model does. Note the trunk is
+        # stochastic too (random initial pair state, per-loop LM dropout), and this does not
+        # cover that, so a seeded call is reproducible only from the sampler onward.
+        seed: int | None = None,
         **unused_features: Tensor,
     ) -> dict[str, Tensor]:
         unexpected = sorted(set(unused_features) - _IGNORED_FEATURE_KEYS)
@@ -981,10 +991,10 @@ class EsmFold2Model(HubPreTrainedModel):
         # Used in design to provide a soft sequence input.
         if res_type_soft is not None:
             res_type_oh = res_type_soft.float()
-            if (
-                not getattr(self.config, "disable_msa_features", False)
-                and provide_soft_sequence_to_msa_and_profile
-            ):
+            # The reference also gates this on config.disable_msa_features, because it zeroes
+            # profile/deletion_mean under that flag. This forward has no such block, so gating
+            # here would leave profile as the discrete one-hot while aatype is soft.
+            if provide_soft_sequence_to_msa_and_profile:
                 profile = res_type_oh
                 msa = res_type_oh.unsqueeze(1)
                 msa_attention_mask = tok_mask.unsqueeze(1)
@@ -1009,7 +1019,15 @@ class EsmFold2Model(HubPreTrainedModel):
         atom_to_token = atom_to_token * atm_mask.long()
 
         use_amp = ref_pos.device.type == "cuda"
-        with torch.amp.autocast("cuda", enabled=use_amp, dtype=torch.bfloat16):
+        # A soft sequence needs grad on, not merely inference mode off: the two are separate
+        # guards, and this model's own entry points (infer_protein, processor.fold) run under
+        # no_grad, where inference_mode(False) alone would still yield no gradient.
+        with (
+            torch.set_grad_enabled(res_type_soft is not None)
+            if res_type_soft is not None
+            else contextlib.nullcontext(),
+            torch.amp.autocast("cuda", enabled=use_amp, dtype=torch.bfloat16),
+        ):
             x_inputs = self.inputs_embedder(
                 aatype=res_type_oh,
                 profile=profile.float(),
@@ -1221,11 +1239,14 @@ class EsmFold2Model(HubPreTrainedModel):
             if _z_dt is not None:
                 del z  # free the full pair before the (sharded) structure phase
 
-        # A soft sequence must not backpropagate through the sampler: its gradient path ends
-        # at the distogram head. Discrete input carries no gradient to fence, and wrapping the
-        # sampler changes which kernels run, which shifts its bf16 output, so the guard is
-        # applied only when a soft sequence is actually present.
-        with torch.no_grad() if res_type_soft is not None else contextlib.nullcontext():
+        # A soft sequence must not backpropagate through the sampler or the confidence head:
+        # its gradient path ends at the distogram head above. DiffusionStructureHead.sample is
+        # already decorated @torch.inference_mode(), so this fence is belt-and-braces there; it
+        # earns its keep over the confidence head, which otherwise records a graph nothing uses.
+        with (
+            torch.no_grad() if res_type_soft is not None else contextlib.nullcontext(),
+            _seed_context(seed),
+        ):
             structure_output = self.structure_head.sample(
                 z_trunk=(_z_dt if _z_dt is not None else z),  # ty:ignore[invalid-argument-type]
                 s_inputs=x_inputs,
@@ -1260,41 +1281,48 @@ class EsmFold2Model(HubPreTrainedModel):
         # Confidence head (#6): on the CP tail, run it distributed straight off the
         # sharded pair (no full-L×L re-gather of z) when the wrapper is installed;
         # otherwise re-gather transiently and run serially. CP-agnostic getattr.
-        _cp_conf = getattr(self, "_cp_confidence_head", None)
-        if _z_dt is not None and _cp_conf is not None:
-            confidence_output = _cp_conf.forward_sharded(
-                _z_dt,
-                _n_orig,
-                s_inputs=x_inputs.detach(),
-                x_pred=sample_coords.detach(),
-                distogram_atom_idx=disto_idx,
-                token_attention_mask=tok_mask,
-                atom_to_token=atom_to_token,
-                atom_attention_mask=atm_mask,
-                asym_id=asym_id,
-                mol_type=mol_type,
-                num_diffusion_samples=n_samples,
-                relative_position_encoding=relative_position_encoding.detach(),
-                token_bonds_encoding=token_bonds_encoding.detach(),
-            )
-        else:
-            if _z_dt is not None:
-                z = _z_dt.full_tensor()[:, :_n_orig, :_n_orig, :].float()
-            confidence_output = self.confidence_head(
-                s_inputs=x_inputs.detach(),
-                z=z.detach().float(),  # ty:ignore[unresolved-attribute]
-                x_pred=sample_coords.detach(),
-                distogram_atom_idx=disto_idx,
-                token_attention_mask=tok_mask,
-                atom_to_token=atom_to_token,
-                atom_attention_mask=atm_mask,
-                asym_id=asym_id,
-                mol_type=mol_type,
-                num_diffusion_samples=n_samples,
-                relative_position_encoding=relative_position_encoding.detach(),
-                token_bonds_encoding=token_bonds_encoding.detach(),
-            )
-        output.update(confidence_output)
+        #
+        # Fenced for the same reason as the sampler: every input below is detached, so with grad
+        # on this would record a graph over the whole confidence trunk that nothing backwards
+        # through, and FoldingTrunk additionally switches to activation checkpointing whenever
+        # grad is enabled. It also leaves plddt/pae carrying grad_fn, which output.py turns into
+        # numpy without detaching.
+        with torch.no_grad() if res_type_soft is not None else contextlib.nullcontext():
+            _cp_conf = getattr(self, "_cp_confidence_head", None)
+            if _z_dt is not None and _cp_conf is not None:
+                confidence_output = _cp_conf.forward_sharded(
+                    _z_dt,
+                    _n_orig,
+                    s_inputs=x_inputs.detach(),
+                    x_pred=sample_coords.detach(),
+                    distogram_atom_idx=disto_idx,
+                    token_attention_mask=tok_mask,
+                    atom_to_token=atom_to_token,
+                    atom_attention_mask=atm_mask,
+                    asym_id=asym_id,
+                    mol_type=mol_type,
+                    num_diffusion_samples=n_samples,
+                    relative_position_encoding=relative_position_encoding.detach(),
+                    token_bonds_encoding=token_bonds_encoding.detach(),
+                )
+            else:
+                if _z_dt is not None:
+                    z = _z_dt.full_tensor()[:, :_n_orig, :_n_orig, :].float()
+                confidence_output = self.confidence_head(
+                    s_inputs=x_inputs.detach(),
+                    z=z.detach().float(),  # ty:ignore[unresolved-attribute]
+                    x_pred=sample_coords.detach(),
+                    distogram_atom_idx=disto_idx,
+                    token_attention_mask=tok_mask,
+                    atom_to_token=atom_to_token,
+                    atom_attention_mask=atm_mask,
+                    asym_id=asym_id,
+                    mol_type=mol_type,
+                    num_diffusion_samples=n_samples,
+                    relative_position_encoding=relative_position_encoding.detach(),
+                    token_bonds_encoding=token_bonds_encoding.detach(),
+                )
+            output.update(confidence_output)
         output["atom_pad_mask"] = (
             atm_mask.unsqueeze(0) if atm_mask.dim() == 1 else atm_mask
         )

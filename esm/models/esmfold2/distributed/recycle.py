@@ -127,10 +127,15 @@ class CPRecycleEngine:
             max_depth=msa_inputs["max_depth"],
             enabled=msa_inputs["subsample_enabled"],
         )
-        B_msa, M, L_msa = msa_i.shape
-        msa_oh = F.one_hot(
-            msa_i.permute(0, 2, 1).long(), num_classes=NUM_RES_TYPES
-        ).float()
+        if msa_i.dim() == 4:
+            # The design path supplies a soft MSA row that is already one-hot shaped.
+            B_msa, M, L_msa, _ = msa_i.shape
+            msa_oh = msa_i.permute(0, 2, 1, 3).float()
+        else:
+            B_msa, M, L_msa = msa_i.shape
+            msa_oh = F.one_hot(
+                msa_i.permute(0, 2, 1).long(), num_classes=NUM_RES_TYPES
+            ).float()
         msa_attn = (
             mask_i.permute(0, 2, 1).float()
             if mask_i is not None
